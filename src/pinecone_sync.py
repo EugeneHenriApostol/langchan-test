@@ -7,19 +7,19 @@ from tqdm.auto import tqdm
 import time
 from dotenv import load_dotenv
 
-# Load environment variables from a .env file
+# load environment variables from a .env file
 load_dotenv()
 
-
-# Pinecone configuration
+# pinecone config
 api_key = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=api_key)
 
 spec = ServerlessSpec(
-    cloud="aws", region="us-east-1"
+    cloud="aws",
+    region="us-east-1"
 )
 
-index_name = 'product-catalog-index'
+index_name = 'gis-index'
 existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 
 # Check if index already exists (it shouldn't if this is the first time)
@@ -43,23 +43,42 @@ time.sleep(1)
 db_connection = mysql.connector.connect(
     host='localhost',
     user='root',
-    password= os.getenv('DB_PASSWORD'),
-    database='product_catalog_db'
+    password=os.getenv('DB_PASSWORD'),
+    database='gis'
 )
 cursor = db_connection.cursor()
+
 
 # Google Generative AI API configuration
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 embed_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
-def fetch_data():
-    query = "SELECT * FROM products"
+# Function to fetch senior high data
+def fetch_senior_high_data():
+    query = "SELECT * FROM senior_high_student_data"
     cursor.execute(query)
     columns = [desc[0] for desc in cursor.description]
     data = pd.DataFrame(cursor.fetchall(), columns=columns)
     return data
 
-def sync_with_pinecone(data):
+# Function to fetch college data
+def fetch_college_data():
+    query = "SELECT * FROM college_student_data"
+    cursor.execute(query)
+    columns = [desc[0] for desc in cursor.description]
+    data = pd.DataFrame(cursor.fetchall(), columns=columns)
+    return data
+
+# Function to fetch event report data
+def fetch_event_data():
+    query = "SELECT * FROM event_reports"
+    cursor.execute(query)
+    columns = [desc[0] for desc in cursor.description]
+    data = pd.DataFrame(cursor.fetchall(), columns=columns)
+    return data
+
+# Function to sync with Pinecone
+def sync_with_pinecone(data, text_key):
     batch_size = 100
     total_batches = (len(data) + batch_size - 1) // batch_size
 
@@ -68,11 +87,13 @@ def sync_with_pinecone(data):
         batch = data.iloc[i:i_end]
 
         # Generate unique IDs
-        ids = [str(row['ProductID']) for _, row in batch.iterrows()]
+        ids = [str(row['stud_id'] if 'stud_id' in row else row['id']) for _, row in batch.iterrows()]
 
         # Combine text fields for embedding
         texts = [
-            f"{row['Description']} {row['ProductName']} {row['ProductBrand']} {row['Gender']} {row['Price']} {row['PrimaryColor']}"
+            f"{row['year']} {row['strand'] if 'strand' in row else row['course']} {row['previous_school']} "
+            f"{row['city']} {row['province']} {row['barangay']} {row['full_address']}"
+            if 'stud_id' in row else f"{row['type']} affecting {row['number_of_students_affected']} students in an area of {row['total_area']} km²"
             for _, row in batch.iterrows()
         ]
 
@@ -81,15 +102,7 @@ def sync_with_pinecone(data):
 
         # Get metadata to store in Pinecone
         metadata = [
-            {
-                'ProductName': row['ProductName'],
-                'ProductBrand': row['ProductBrand'],
-                'Gender': row['Gender'],
-                'Price': row['Price'],
-                'Description': row['Description'],
-                'PrimaryColor': row['PrimaryColor']
-            }
-            for _, row in batch.iterrows()
+            row.to_dict() for _, row in batch.iterrows()
         ]
 
         # Upserting Vectors
@@ -98,8 +111,15 @@ def sync_with_pinecone(data):
             upsert_pbar.update(len(ids))  # Update the upsert progress bar
 
 def main():
-    data = fetch_data()
-    sync_with_pinecone(data)
+    # Sync each table's data with Pinecone
+    senior_high_data = fetch_senior_high_data()
+    sync_with_pinecone(senior_high_data, 'Senior High School Data')
+
+    college_data = fetch_college_data()
+    sync_with_pinecone(college_data, 'College Student Data')
+
+    event_data = fetch_event_data()
+    sync_with_pinecone(event_data, 'Event Report Data')
 
 if __name__ == "__main__":
     main()
